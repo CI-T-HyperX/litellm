@@ -172,18 +172,22 @@ class RouteChecks:
                 pass
             elif route in ("/user/info", "/v2/user/info"):
                 # check if user can access this route
-                query_params = request.query_params
-                user_id = query_params.get("user_id")
-                verbose_proxy_logger.debug(
-                    f"user_id: {user_id} & valid_token.user_id: {valid_token.user_id}"
-                )
-                if user_id and user_id != valid_token.user_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="key not allowed to access this user's info. user_id={}, key's user_id={}".format(
-                            user_id, valid_token.user_id
-                        ),
+                # Admin view-only users are allowed to query any user (handled by endpoint)
+                if _user_role == LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value:
+                    pass
+                else:
+                    query_params = request.query_params
+                    user_id = query_params.get("user_id")
+                    verbose_proxy_logger.debug(
+                        f"user_id: {user_id} & valid_token.user_id: {valid_token.user_id}"
                     )
+                    if user_id and user_id != valid_token.user_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="key not allowed to access this user's info. user_id={}, key's user_id={}".format(
+                                user_id, valid_token.user_id
+                            ),
+                        )
             elif route == "/model/info":
                 # /model/info just shows models user has access to
                 pass

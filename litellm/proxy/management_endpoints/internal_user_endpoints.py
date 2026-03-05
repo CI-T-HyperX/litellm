@@ -826,7 +826,6 @@ async def _is_team_admin_for_user(
                 team_id=team_id,
                 prisma_client=prisma_client,
                 user_api_key_cache=user_api_key_cache,
-                check_db_only=True,
             )
             if _is_user_team_admin(
                 user_api_key_dict=user_api_key_dict, team_obj=team_obj

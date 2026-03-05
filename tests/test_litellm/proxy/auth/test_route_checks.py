@@ -1249,3 +1249,32 @@ def test_v2_user_info_non_admin_allowed_for_own_user():
         valid_token=valid_token,
         request_data={},
     )
+
+
+def test_v2_user_info_admin_view_only_allowed_for_other_user():
+    """
+    Test that /v2/user/info allows PROXY_ADMIN_VIEW_ONLY to query another user's info
+    at the route level (endpoint handles further access control).
+    """
+    user_obj = LiteLLM_UserTable(
+        user_id="admin-viewer",
+        user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+    )
+
+    valid_token = UserAPIKeyAuth(
+        user_id="admin-viewer",
+        user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+    )
+
+    request = MagicMock(spec=Request)
+    request.query_params = {"user_id": "other-user"}
+
+    # Should not raise — admin view-only is allowed through at route level
+    RouteChecks.non_proxy_admin_allowed_routes_check(
+        user_obj=user_obj,
+        _user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+        route="/v2/user/info",
+        request=request,
+        valid_token=valid_token,
+        request_data={},
+    )

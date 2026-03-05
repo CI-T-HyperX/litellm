@@ -1339,9 +1339,8 @@ async def test_user_info_v2_returns_user_profile(mocker):
     assert response.user_id == "test-user-123"
     assert response.user_info.user_email == "test@example.com"
     assert response.user_info.teams == ["team-1", "team-2"]
-    # Verify no keys or teams fields on the response
-    assert not hasattr(response, "keys")
-    assert not hasattr(response, "teams")
+    # Verify the response model only contains user_id and user_info fields
+    assert set(type(response).model_fields.keys()) == {"user_id", "user_info"}
 
 
 @pytest.mark.asyncio
