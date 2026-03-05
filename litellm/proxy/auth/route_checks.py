@@ -172,8 +172,11 @@ class RouteChecks:
                 pass
             elif route in ("/user/info", "/v2/user/info"):
                 # check if user can access this route
-                # Admin view-only users are allowed to query any user (handled by endpoint)
-                if _user_role == LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value:
+                # Admin view-only users are allowed through on v2 only (endpoint handles access control)
+                if (
+                    route == "/v2/user/info"
+                    and _user_role == LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value
+                ):
                     pass
                 else:
                     query_params = request.query_params

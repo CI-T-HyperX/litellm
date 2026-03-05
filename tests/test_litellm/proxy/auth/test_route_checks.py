@@ -1269,7 +1269,7 @@ def test_v2_user_info_admin_view_only_allowed_for_other_user():
     request = MagicMock(spec=Request)
     request.query_params = {"user_id": "other-user"}
 
-    # Should not raise — admin view-only is allowed through at route level
+    # Should not raise — admin view-only is allowed through on v2
     RouteChecks.non_proxy_admin_allowed_routes_check(
         user_obj=user_obj,
         _user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
@@ -1278,3 +1278,33 @@ def test_v2_user_info_admin_view_only_allowed_for_other_user():
         valid_token=valid_token,
         request_data={},
     )
+
+
+def test_v1_user_info_admin_view_only_blocked_for_other_user():
+    """
+    Test that /user/info (v1) still blocks PROXY_ADMIN_VIEW_ONLY from querying
+    another user's info — preserves backwards-compatible behavior.
+    """
+    user_obj = LiteLLM_UserTable(
+        user_id="admin-viewer",
+        user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+    )
+
+    valid_token = UserAPIKeyAuth(
+        user_id="admin-viewer",
+        user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+    )
+
+    request = MagicMock(spec=Request)
+    request.query_params = {"user_id": "other-user"}
+
+    with pytest.raises(HTTPException) as exc_info:
+        RouteChecks.non_proxy_admin_allowed_routes_check(
+            user_obj=user_obj,
+            _user_role=LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY.value,
+            route="/user/info",
+            request=request,
+            valid_token=valid_token,
+            request_data={},
+        )
+    assert exc_info.value.status_code == 403
