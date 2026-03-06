@@ -1,0 +1,141 @@
+name: 🔄 Sync Upstream LiteLLM > Flow
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Runs daily at midnight UTC
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/BerriAI/litellm.git || true
+
+      - name: Fetch upstream changes
+        run: |
+          git fetch upstream main
+          git fetch origin main
+
+      - name: Check for upstream changes
+        id: check_changes
+        run: |
+          BEHIND_COUNT=$(git rev-list --count origin/main..upstream/main)
+          echo "behind_count=$BEHIND_COUNT" >> $GITHUB_OUTPUT
+
+          if [ "$BEHIND_COUNT" -gt "0" ]; then
+            echo "changes_detected=true" >> $GITHUB_OUTPUT
+            echo "✅ Upstream has $BEHIND_COUNT new commit(s) ahead of origin/main."
+          else
+            echo "changes_detected=false" >> $GITHUB_OUTPUT
+            echo "✅ origin/main is up to date with upstream."
+          fi
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create sync branch
+        if: steps.check_changes.outputs.changes_detected == 'true'
+        run: |
+          BRANCH_NAME="sync-upstream-$(date +'%Y-%m-%d-%H%M%S')"
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+
+          git checkout origin/main -b "$BRANCH_NAME"
+
+          if git merge upstream/main --no-edit; then
+            echo "✅ Merged successfully without conflicts"
+          else
+            echo "⚠️ Merge conflicts detected"
+            # Mark conflicts and commit them
+            git add -A
+            git commit -m "Sync with upstream litellm (merge conflicts - needs manual resolution)" || {
+              echo "Unable to commit merge. Manual intervention required."
+              exit 1
+            }
+          fi
+
+      - name: Push sync branch
+        if: steps.check_changes.outputs.changes_detected == 'true'
+        run: |
+          git push origin "$BRANCH_NAME"
+          echo "✅ Branch $BRANCH_NAME pushed."
+
+      - name: Create Pull Request
+        if: steps.check_changes.outputs.changes_detected == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BEHIND_COUNT: ${{ steps.check_changes.outputs.behind_count }}
+        run: |
+          API_URL="https://api.github.com/repos/${{ github.repository }}/pulls"
+          SYNC_DATE="$(date +'%Y-%m-%d')"
+
+          PR_TITLE="chore: sync with upstream litellm ($SYNC_DATE)"
+          PR_BODY=$(cat <<EOF
+          ## Upstream Sync
+
+          This PR syncs the fork with the upstream [BerriAI/litellm](https://github.com/BerriAI/litellm) repository.
+
+          - **Commits behind upstream**: $BEHIND_COUNT
+          - **Sync date**: $SYNC_DATE
+
+          EOF
+          )
+
+          PAYLOAD=$(jq --null-input \
+            --arg title "$PR_TITLE" \
+            --arg body  "$PR_BODY" \
+            --arg head  "$BRANCH_NAME" \
+            --arg base  "main" \
+            '{ title: $title, body: $body, head: $head, base: $base }')
+
+          echo "Creating PR at: $API_URL"
+          PR_NUMBER=$(curl --fail-with-body \
+            --request POST \
+            --url "$API_URL" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data "$PAYLOAD" | jq '.number')
+
+          echo "PR_NUMBER=$PR_NUMBER" >> $GITHUB_ENV
+          if [ "$PR_NUMBER" = "null" ] || [ -z "$PR_NUMBER" ]; then
+            echo "❌ Failed to extract PR number." && exit 1
+          else
+            echo "✅ PR #$PR_NUMBER created."
+          fi
+
+      - name: Add reviewers
+        if: steps.check_changes.outputs.changes_detected == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          API_URL="https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers"
+          REVIEWERS="${{ vars.FLOW_CORE_PR_REVIEWERS }}"
+          if [ -z "$REVIEWERS" ]; then
+            echo "⚠️  No reviewers configured. Skipping." && exit 0
+          fi
+
+          PAYLOAD=$(jq --null-input \
+            --arg reviewers "$REVIEWERS" \
+            '{ reviewers: ($reviewers | split(",")) }')
+
+          echo "Requesting review at: $API_URL"
+          curl --fail-with-body \
+            --request POST \
+            --url "$API_URL" \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data "$PAYLOAD"
