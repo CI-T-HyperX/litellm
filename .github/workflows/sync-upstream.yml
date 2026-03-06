@@ -42,26 +42,35 @@ jobs:
             echo "✅ origin/main is up to date with upstream."
           fi
 
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Create sync branch
         if: steps.check_changes.outputs.changes_detected == 'true'
         run: |
           BRANCH_NAME="sync-upstream-$(date +'%Y-%m-%d-%H%M%S')"
           echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
 
-          git checkout origin/main -b $BRANCH_NAME
+          git checkout origin/main -b "$BRANCH_NAME"
 
-          git merge upstream/main --no-edit || {
-            echo "Merge conflicts detected. Branch will be pushed for manual resolution."
-            git merge --abort || true
-            git merge upstream/main --no-commit --no-ff || true
+          if git merge upstream/main --no-edit; then
+            echo "✅ Merged successfully without conflicts"
+          else
+            echo "⚠️ Merge conflicts detected"
+            # Mark conflicts and commit them
             git add -A
-            git commit -m "Sync with upstream litellm (merge conflicts - needs manual resolution)"
-          }
+            git commit -m "Sync with upstream litellm (merge conflicts - needs manual resolution)" || {
+              echo "Unable to commit merge. Manual intervention required."
+              exit 1
+            }
+          fi
 
       - name: Push sync branch
         if: steps.check_changes.outputs.changes_detected == 'true'
         run: |
-          git push origin $BRANCH_NAME
+          git push origin "$BRANCH_NAME"
           echo "✅ Branch $BRANCH_NAME pushed."
 
       - name: Create Pull Request
@@ -74,12 +83,16 @@ jobs:
           SYNC_DATE="$(date +'%Y-%m-%d')"
 
           PR_TITLE="chore: sync with upstream litellm ($SYNC_DATE)"
-          PR_BODY="## Upstream Sync
+          PR_BODY=$(cat <<EOF
+          ## Upstream Sync
 
           This PR syncs the fork with the upstream [BerriAI/litellm](https://github.com/BerriAI/litellm) repository.
 
           - **Commits behind upstream**: $BEHIND_COUNT
-          - **Sync date**: $SYNC_DATE"
+          - **Sync date**: $SYNC_DATE
+
+          EOF
+          )
 
           PAYLOAD=$(jq --null-input \
             --arg title "$PR_TITLE" \
@@ -97,7 +110,11 @@ jobs:
             --data "$PAYLOAD" | jq '.number')
 
           echo "PR_NUMBER=$PR_NUMBER" >> $GITHUB_ENV
-          echo "✅ PR #$PR_NUMBER created."
+          if [ "$PR_NUMBER" = "null" ] || [ -z "$PR_NUMBER" ]; then
+            echo "❌ Failed to extract PR number." && exit 1
+          else
+            echo "✅ PR #$PR_NUMBER created."
+          fi
 
       - name: Add reviewers
         if: steps.check_changes.outputs.changes_detected == 'true'
@@ -106,11 +123,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           API_URL="https://api.github.com/repos/${{ github.repository }}/pulls/$PR_NUMBER/requested_reviewers"
-          REVIEWERS='["ciandt-danielms","pierre-pinto"]'
+          REVIEWERS="${{ vars.FLOW_CORE_PR_REVIEWERS }}"
+          if [ -z "$REVIEWERS" ]; then
+            echo "⚠️  No reviewers configured. Skipping." && exit 0
+          fi
 
           PAYLOAD=$(jq --null-input \
-            --argjson reviewers "$REVIEWERS" \
-            '{ reviewers: $reviewers }')
+            --arg reviewers "$REVIEWERS" \
+            '{ reviewers: ($reviewers | split(",")) }')
 
           echo "Requesting review at: $API_URL"
           curl --fail-with-body \
