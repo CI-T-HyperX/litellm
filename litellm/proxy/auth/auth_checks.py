@@ -839,7 +839,7 @@ def _check_end_user_budget(
     Raises:
         litellm.BudgetExceededError: If end user has exceeded their budget
     """
-    if route in LiteLLMRoutes.info_routes.value:
+    if RouteChecks.is_info_route(route):
         return
 
     if end_user_obj.litellm_budget_table is None:
@@ -1316,6 +1316,8 @@ async def get_user_object(
                 new_user_params: Dict[str, Any] = {
                     "user_id": user_id,
                 }
+                if user_email is not None:
+                    new_user_params["user_email"] = user_email
                 if litellm.default_internal_user_params is not None:
                     new_user_params.update(litellm.default_internal_user_params)
 
