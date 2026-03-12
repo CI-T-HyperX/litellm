@@ -4,9 +4,9 @@
 
 Este repositório possui três branches principais:
 
-- `main` — espelho exato do upstream [BerriAI/litellm](https://github.com/BerriAI/litellm). Nunca deve receber commits diretos; é sobrescrita automaticamente a cada sincronização.
+- `main` — espelho exato do upstream [BerriAI/litellm](https://github.com/BerriAI/litellm). Nunca deve receber commits diretos; é sobrescrita automaticamente a cada sincronização. **Não é a branch default**.
 - `develop-flow` — branch de ***desenvolvimento*** com as alterações específicas do *Flow*. Rebase sobre `main` após cada sincronização. Todo desenvolvimento novo deve partir desta branch.
-- `production-flow` — branch de produção. Recebe merges de `develop-flow` após validação, representando o estado atual do ambiente produtivo da Flow.
+- `production-flow` — [**default**] branch de produção. Recebe merges de `develop-flow` após validação, representando o estado atual do ambiente produtivo da Flow.
 
 ### Principais orientações
 
@@ -17,6 +17,50 @@ Este repositório possui três branches principais:
 
 ---
 
+## Desenvolvimento
+
+### Rodando pipes
+
+#### Build e Push de imagem para AWS ECR
+
+Para rodar localmente utilizando um emulador de execução de pipe
+
+1) Instalar o emulador de execução de pipe `act` (*se ainda não instalado)*
+
+```sh
+curl https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
+```
+
+2) Rodar o comando act com parâmetros
+
+```sh
+./bin/act workflow_dispatch -j local-build --workflows .github/workflows/flow-build-and-push-ecr.yml --input local_test=true --network host
+```
+
+3) Verificar se o registro foi feito corretamente consultando a url abaixo:
+
+```sh
+curl http://localhost:5001/v2/litellm-dev/tags/list
+```
+
+### Operação local do LiteLLM
+
+Logo após a pipe acima ser rodada a imagem do **LiteLLM** deveria estar disponível.
+
+#### Arquivo de configuração
+
+Além da imagem é necessário o arquivo `config.yaml` com as chaves dos modelos. Consulte o arquivo de exemplo `dev_config.yaml`.
+
+#### Rodando localmente
+
+Após confirmar que o arquivo `config.yaml` existe e está corretamente preenchido podemos rodar a aplicação com o comando abaixo:
+
+```sh
+make run-wf
+```
+
+O serviço deve estar acessivel na URL [http://localhost:4000](http://localhost:4000).
+
 ## Workflow de Sincronização com Upstream (`sync-upstream.yml`)
 
 Este workflow mantém o fork Flow sincronizado automaticamente com o repositório upstream [BerriAI/litellm](https://github.com/BerriAI/litellm).
@@ -25,7 +69,6 @@ Este workflow mantém o fork Flow sincronizado automaticamente com o repositóri
 
 - **Agendado**: Executa automaticamente toda **segunda-feira e quarta-feira à meia-noite UTC**
 - **Manual**: Pode ser acionado a qualquer momento via `workflow_dispatch` na interface do GitHub Actions
-
 
 #### Ação necessária
 
