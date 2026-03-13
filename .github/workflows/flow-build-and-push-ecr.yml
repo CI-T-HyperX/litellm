@@ -1,0 +1,192 @@
+name: 🚀 Build and Push to ECR
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL TESTING WITH `act`
+#
+# Installing act:
+#   - Enter the project's folder on your machine. Ex: cd ~/projects/litellm
+#   - run: curl https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
+#   - A /bin directory will be created in your project folder. The 'act' application must be there.
+#
+# To skip AWS steps and only test the build locally:
+#   ./bin/act workflow_dispatch -j local-build --workflows .github/workflows/flow-build-and-push-ecr.yml --input local_test=true --network host
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      local_test:
+        description: 'Local test only (skip AWS / ECR push)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: litellm
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+          # Alternative: use access keys (less secure)
+          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          # Determine version tag
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            VERSION=${{ github.event.release.tag_name }}
+          else
+            VERSION=latest
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.version }}
+          SHORT_SHA: ${{ steps.meta.outputs.short_sha }}
+        run: |
+          # Build and tag with multiple tags
+          docker buildx build \
+            -f Dockerfile \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$SHORT_SHA \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+            --push \
+            --platform linux/amd64,linux/arm64 \
+            --cache-from type=registry,ref=$ECR_REGISTRY/$ECR_REPOSITORY:buildcache \
+            --cache-to type=registry,ref=$ECR_REGISTRY/$ECR_REPOSITORY:buildcache,mode=max \
+            .
+
+      - name: Output image URI
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ steps.meta.outputs.version }}
+        run: |
+          echo "Image pushed to: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "IMAGE_URI=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Create deployment artifact
+        run: |
+          mkdir -p artifacts
+          echo "${{ env.IMAGE_URI }}" > artifacts/image-uri.txt
+          echo "${{ steps.meta.outputs.version }}" > artifacts/version.txt
+          echo "${{ steps.meta.outputs.short_sha }}" > artifacts/commit-sha.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-artifacts
+          path: artifacts/
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # LOCAL-ONLY job: builds the image.
+  # Runs when triggered via workflow_dispatch with local_test=true
+  # ─────────────────────────────────────────────────────────────────────────
+  local-build:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.local_test == 'true'
+    env:
+      REGISTRY_PORT: 5001
+      REPOSITORY_NAME: litellm-dev
+
+    steps:
+      - name: Clean up
+        run: |
+          docker stop local-ecr-registry 2>/dev/null || true
+          docker rm local-ecr-registry 2>/dev/null || true
+          docker ps -q --filter "publish=${REGISTRY_PORT}" | xargs -r docker stop
+          docker ps -aq --filter "publish=${REGISTRY_PORT}" | xargs -r docker rm
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract metadata
+        id: meta
+        run: |
+          echo "short_sha=$(git rev-parse --short HEAD 2>/dev/null || echo local)" >> $GITHUB_OUTPUT
+          echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: Build image locally
+        run: |
+          docker build \
+            -f Dockerfile \
+            -t litellm-dev:local \
+            -t litellm-dev:${{ steps.meta.outputs.short_sha }} \
+            .
+
+      - name: Verify local image exists
+        run: |
+          if ! docker image inspect litellm-dev:local > /dev/null 2>&1; then
+            echo "Error: Image litellm-dev:local not found!"
+            echo "Available images:"
+            docker images
+            exit 1
+          fi
+          echo "✓ Image found: litellm-dev:local"
+
+      - name: Starting Local Docker Registry
+        run: |
+          docker run -d \
+            --name local-ecr-registry \
+            -p ${REGISTRY_PORT}:5000 \
+            registry:2
+          sleep 3
+          echo "✓ Local registry started on port ${REGISTRY_PORT}"
+
+      - name: Tagging image for local registry
+        run: |
+          LOCAL_REGISTRY_TAG="localhost:${REGISTRY_PORT}/${REPOSITORY_NAME}:${{ steps.meta.outputs.short_sha }}"
+          docker tag litellm-dev:local $LOCAL_REGISTRY_TAG
+          echo "✓ Tagged: $LOCAL_REGISTRY_TAG"
+
+      - name: Pushing to local Docker registry
+        run: |
+          LOCAL_REGISTRY_TAG="localhost:${REGISTRY_PORT}/${REPOSITORY_NAME}:${{ steps.meta.outputs.short_sha }}"
+          docker push $LOCAL_REGISTRY_TAG
+          echo "✓ Pushed: $LOCAL_REGISTRY_TAG"
+

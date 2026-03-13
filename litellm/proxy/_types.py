@@ -1,59 +1,40 @@
 import enum
 import json
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Literal,
+                    Optional, Union)
 
 import httpx
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    Json,
-    field_validator,
-    model_validator,
-)
+from pydantic import (BaseModel, ConfigDict, Field, Json, field_validator,
+                      model_validator)
 from typing_extensions import Required, TypedDict
 
 from litellm._uuid import uuid
 from litellm.types.integrations.slack_alerting import AlertType
-from litellm.types.llms.openai import (
-    AllMessageValues,
-    OpenAIFileObject,
-    ResponsesAPIResponse,
-)
-from litellm.types.mcp import (
-    MCPAuthType,
-    MCPCredentials,
-    MCPTransport,
-    MCPTransportType,
-)
+from litellm.types.llms.openai import (AllMessageValues, OpenAIFileObject,
+                                       ResponsesAPIResponse)
+from litellm.types.mcp import (MCPAuthType, MCPCredentials, MCPTransport,
+                               MCPTransportType)
 from litellm.types.mcp_server.mcp_server_manager import MCPInfo
 from litellm.types.router import RouterErrors, UpdateRouterConfig
 from litellm.types.secret_managers.main import KeyManagementSystem
-from litellm.types.utils import (
-    CallTypes,
-    CostBreakdown,
-    EmbeddingResponse,
-    GenericBudgetConfigType,
-    ImageResponse,
-    LiteLLMBatch,
-    LiteLLMFineTuningJob,
-    LiteLLMPydanticObjectBase,
-    ModelResponse,
-    ProviderField,
-    StandardCallbackDynamicParams,
-    StandardLoggingGuardrailInformation,
-    StandardLoggingMCPToolCall,
-    StandardLoggingModelInformation,
-    StandardLoggingPayloadErrorInformation,
-    StandardLoggingPayloadStatus,
-    StandardLoggingVectorStoreRequest,
-    StandardPassThroughResponseObject,
-    TextCompletionResponse,
-)
+from litellm.types.utils import (CallTypes, CostBreakdown, EmbeddingResponse,
+                                 GenericBudgetConfigType, ImageResponse,
+                                 LiteLLMBatch, LiteLLMFineTuningJob,
+                                 LiteLLMPydanticObjectBase, ModelResponse,
+                                 ProviderField, StandardCallbackDynamicParams,
+                                 StandardLoggingGuardrailInformation,
+                                 StandardLoggingMCPToolCall,
+                                 StandardLoggingModelInformation,
+                                 StandardLoggingPayloadErrorInformation,
+                                 StandardLoggingPayloadStatus,
+                                 StandardLoggingVectorStoreRequest,
+                                 StandardPassThroughResponseObject,
+                                 TextCompletionResponse)
 from litellm.types.videos.main import VideoObject
 
-from .types_utils.utils import get_instance_fn, validate_custom_validate_return_type
+from .types_utils.utils import (get_instance_fn,
+                                validate_custom_validate_return_type)
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -684,6 +665,8 @@ class LiteLLMRoutes(enum.Enum):
         "/team/daily/activity",
         "/tag/daily/activity",
         "/tag/list",
+        "/audit",
+        "/audit/{id}",
     ] + info_routes
 
     # All routes accesible by an Org Admin
@@ -855,6 +838,7 @@ class LiteLLM_ObjectPermissionBase(LiteLLMPydanticObjectBase):
     vector_stores: Optional[List[str]] = None
     agents: Optional[List[str]] = None
     agent_access_groups: Optional[List[str]] = None
+    models: Optional[List[str]] = None
 
 
 class GenerateRequestBase(LiteLLMPydanticObjectBase):
@@ -1087,6 +1071,12 @@ class SpecialMCPServerName(str, enum.Enum):
     all_proxy_servers = "all-proxy-mcpservers"
 
 
+class MCPApprovalStatus(str, enum.Enum):
+    pending_review = "pending_review"
+    active = "active"
+    rejected = "rejected"
+
+
 # MCP Proxy Request Types
 class NewMCPServerRequest(LiteLLMPydanticObjectBase):
     server_id: Optional[str] = None
@@ -1117,6 +1107,18 @@ class NewMCPServerRequest(LiteLLMPydanticObjectBase):
     is_byok: bool = False
     byok_description: List[str] = Field(default_factory=list)
     byok_api_key_help_url: Optional[str] = None
+    source_url: Optional[str] = None
+    # BYOM submission fields — set by the endpoint, not by the caller.
+    # Any caller-provided values are silently overridden before persistence.
+    approval_status: Optional[str] = Field(
+        None, description="Server-managed: set by the endpoint; caller values are overridden."
+    )
+    submitted_by: Optional[str] = Field(
+        None, description="Server-managed: set by the endpoint; caller values are overridden."
+    )
+    submitted_at: Optional[datetime] = Field(
+        None, description="Server-managed: set by the endpoint; caller values are overridden."
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -1176,6 +1178,7 @@ class UpdateMCPServerRequest(LiteLLMPydanticObjectBase):
     is_byok: bool = False
     byok_description: List[str] = Field(default_factory=list)
     byok_api_key_help_url: Optional[str] = None
+    source_url: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -1239,6 +1242,16 @@ class LiteLLM_MCPServerTable(LiteLLMPydanticObjectBase):
     byok_description: List[str] = Field(default_factory=list)
     byok_api_key_help_url: Optional[str] = None
     has_user_credential: Optional[bool] = None
+    source_url: Optional[str] = None
+    # BYOM submission fields
+    approval_status: Optional[str] = Field(
+        default="active",
+        description="Approval status: 'pending_review', 'active', 'rejected'",
+    )
+    submitted_by: Optional[str] = None
+    submitted_at: Optional[datetime] = None
+    reviewed_at: Optional[datetime] = None
+    review_notes: Optional[str] = None
 
 
 class MakeMCPServersPublicRequest(LiteLLMPydanticObjectBase):
@@ -1253,6 +1266,49 @@ class MCPUserCredentialRequest(LiteLLMPydanticObjectBase):
 class MCPUserCredentialResponse(LiteLLMPydanticObjectBase):
     server_id: str
     has_credential: bool
+
+
+class MCPOAuthUserCredentialRequest(LiteLLMPydanticObjectBase):
+    """Stores a user's OAuth2 token for an OpenAPI MCP server."""
+
+    access_token: str
+    refresh_token: Optional[str] = None
+    expires_in: Optional[int] = None  # seconds until expiry
+    scopes: Optional[List[str]] = None
+
+
+class MCPOAuthUserCredentialStatus(LiteLLMPydanticObjectBase):
+    """Describes whether the calling user has a stored OAuth credential."""
+
+    server_id: str
+    has_credential: bool
+    expires_at: Optional[str] = None  # ISO-8601
+    is_expired: bool = False
+    connected_at: Optional[str] = None  # ISO-8601
+
+
+class MCPUserCredentialListItem(LiteLLMPydanticObjectBase):
+    """One entry in the /user-credentials list."""
+
+    server_id: str
+    server_name: Optional[str] = None
+    alias: Optional[str] = None
+    credential_type: str  # "oauth2" or "byok"
+    has_credential: bool
+    expires_at: Optional[str] = None  # ISO-8601; None means non-expiring
+    connected_at: Optional[str] = None  # ISO-8601
+
+
+class RejectMCPServerRequest(LiteLLMPydanticObjectBase):
+    review_notes: Optional[str] = None
+
+
+class MCPSubmissionsSummary(LiteLLMPydanticObjectBase):
+    total: int
+    pending_review: int
+    active: int
+    rejected: int
+    items: List["LiteLLM_MCPServerTable"]
 
 
 ######## Skills API Types ########
@@ -2203,6 +2259,10 @@ class ConfigGeneralSettings(LiteLLMPydanticObjectBase):
         None,
         description="If True, forwards client headers (e.g. Authorization) to the LLM API. Required for Claude Code with Max subscription.",
     )
+    mcp_required_fields: Optional[List[str]] = Field(
+        None,
+        description="List of MCP server fields that must be filled in for a submission to pass standards checks (e.g. ['description', 'source_url', 'alias']).",
+    )
 
 
 class ConfigYAML(LiteLLMPydanticObjectBase):
@@ -2382,6 +2442,7 @@ class UserAPIKeyAuth(
     user_max_budget: Optional[float] = None
     request_route: Optional[str] = None
     user: Optional[Any] = None  # Expanded user object when expand=user is used
+    created_by_user: Optional[Any] = None  # Expanded created_by user when expand=user is used
     end_user_object_permission: Optional[LiteLLM_ObjectPermissionTable] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -2425,7 +2486,8 @@ class UserAPIKeyAuth(
 
         This is used to track number of requests/spend for health check calls.
         """
-        from litellm.constants import LITTELM_INTERNAL_HEALTH_SERVICE_ACCOUNT_NAME
+        from litellm.constants import \
+            LITTELM_INTERNAL_HEALTH_SERVICE_ACCOUNT_NAME
 
         return cls(
             api_key=LITTELM_INTERNAL_HEALTH_SERVICE_ACCOUNT_NAME,
@@ -2457,7 +2519,8 @@ class UserAPIKeyAuth(
 
         This is used to track actions performed by automated system jobs.
         """
-        from litellm.constants import LITELLM_INTERNAL_JOBS_SERVICE_ACCOUNT_NAME
+        from litellm.constants import \
+            LITELLM_INTERNAL_JOBS_SERVICE_ACCOUNT_NAME
 
         return cls(
             api_key=LITELLM_INTERNAL_JOBS_SERVICE_ACCOUNT_NAME,
@@ -2863,7 +2926,8 @@ class LiteLLM_AuditLogs(LiteLLMPydanticObjectBase):
 
     @model_validator(mode="after")
     def mask_api_keys(self):
-        from litellm.litellm_core_utils.sensitive_data_masker import SensitiveDataMasker
+        from litellm.litellm_core_utils.sensitive_data_masker import \
+            SensitiveDataMasker
 
         masker = SensitiveDataMasker(sensitive_patterns={"key"})
 
