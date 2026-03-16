@@ -1,0 +1,330 @@
+name: 🚢 Deploy to AWS EKS
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Deploys a LiteLLM image to Kubernetes via kubectl apply using the manifest
+# at deploy/kubernetes/flow-deploy-eks.yaml.
+#
+# Two environments are supported, each with a different strategy:
+#
+#   development  — fully local, no real AWS required.
+#                  ECR is emulated by moto server (service container).
+#                  Kubernetes is emulated by a kind cluster spun up in the runner.
+#                  Image pull policy: IfNotPresent (image pre-loaded into kind).
+#
+#   production   — targets real AWS infrastructure.
+#                  Authenticates via OIDC (IAM role assumption).
+#                  Verifies the image exists in ECR before deploying.
+#                  Applies the manifest against the real EKS cluster.
+#                  Image pull policy: Always (pulls from ECR on every rollout).
+#                  Requires manual approval via the "production" GitHub environment.
+#
+#
+# LOCAL TESTING WITH `act`
+#
+# Install act (if not already installed):
+#   curl https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
+#
+# Run the development environment locally (no real AWS required):
+#   ./bin/act workflow_dispatch \
+#     --workflows .github/workflows/flow-deploy-eks.yml \
+#     --input environment=development \
+#     --network host
+#
+# Required GitHub secrets (production only):
+#   AWS_ROLE_TO_ASSUME   - IAM role ARN with ECR pull + EKS describe/update access
+#   EKS_CLUSTER_NAME     - Name of the target EKS cluster
+#
+# Required GitHub environments:
+#   development          - no protection rules required
+#   production           - configure Required Reviewers for manual approval gate
+#
+# Workflow inputs (workflow_dispatch):
+#   environment          - development | production  (default: production)
+#   image_tag            - ECR image tag to deploy   (default: latest)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: false
+        type: string
+        default: production
+      image_tag:
+        description: 'ECR image tag to deploy (e.g. latest, v1.2.3, or a short SHA)'
+        required: false
+        type: string
+        default: latest
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: litellm
+  K8S_NAMESPACE: litellm
+  K8S_DEPLOYMENT: litellm-deployment
+  K8S_CONTAINER: litellm-container
+  AWS_PAGER: ""
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Resolve which image tag to roll out.
+  # If the caller supplies a tag we use it; otherwise we fall back to "latest".
+  # ───────────────────────────────────────────────────────────────────────────
+  resolve-image:
+    name: Resolve image tag
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [[ -z "$TAG" ]]; then
+            TAG="latest"
+          fi
+          echo "image_tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Will deploy tag: ${TAG}"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Development deploy — fully local, no real AWS required.
+  # ECR interactions use moto server; Kubernetes interactions use a kind cluster.
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-development:
+    name: Deploy › development
+    runs-on: ubuntu-latest
+    needs: resolve-image
+    if: github.event.inputs.environment == 'development'
+    environment: development
+    permissions:
+      contents: read
+
+    services:
+      moto:
+        image: motoserver/moto:latest
+        ports:
+          - 5000:5000
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        run: |
+          KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install AWS CLI
+        run: |
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
+          aws --version
+
+      - name: Wait for moto server (development only)
+        run: |
+          for i in $(seq 1 10); do
+            curl -sf http://localhost:5000 > /dev/null && echo "✓ moto ready" && break
+            echo "Waiting for moto... ($i/10)"
+            sleep 2
+          done
+
+      - name: Install kind (development only)
+        run: |
+          curl -fsSL -o kind https://kind.sigs.k8s.io/dl/v0.23.0/kind-linux-amd64
+          chmod +x kind && sudo mv kind /usr/local/bin/kind
+          kind version
+
+      - name: Create ECR repository in moto (development only)
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          AWS_ENDPOINT_URL: http://localhost:5000
+        run: |
+          aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }}
+          echo "✓ ECR repository created in moto"
+
+      - name: Seed image tag into moto ECR (development only)
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          AWS_ENDPOINT_URL: http://localhost:5000
+          IMAGE_TAG: ${{ needs.resolve-image.outputs.image_tag }}
+        run: |
+          # Insert a minimal OCI manifest so describe-images resolves the tag
+          MANIFEST=$(cat <<'EOF'
+          {"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{"mediaType":"application/vnd.docker.container.image.v1+json","size":7023,"digest":"sha256:b5b2b2c507a0944348e0303114d8d93aaaa081732b86451d9bce1f432a537bc7"},"layers":[]}
+          EOF
+          )
+          aws ecr put-image \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-tag "$IMAGE_TAG" \
+            --image-manifest "$MANIFEST"
+          echo "✓ Tag '$IMAGE_TAG' seeded in moto ECR"
+
+      - name: Verify image exists in ECR (Emulated by moto)
+        env:
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          AWS_ENDPOINT_URL: http://localhost:5000
+          IMAGE_TAG: ${{ needs.resolve-image.outputs.image_tag }}
+        run: |
+          aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-ids imageTag=$IMAGE_TAG
+          echo "✓ Image confirmed in moto ECR"
+
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          echo "ECR_REGISTRY=${ECR_REGISTRY}" >> $GITHUB_ENV
+          echo "IMAGE_URI=${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}:${IMAGE_TAG}" >> $GITHUB_ENV
+
+      - name: Create kind cluster (development only)
+        run: |
+          kind create cluster --name dev-cluster --wait 60s
+          kubectl cluster-info --context kind-dev-cluster
+          echo "✓ kind cluster ready"
+
+      - name: Seed image into kind (development only)
+        run: |
+          # Tag nginx:alpine as the ECR URI — nginx keeps running so pods stay healthy
+          docker pull nginx:alpine
+          docker tag nginx:alpine ${{ env.IMAGE_URI }}
+          kind load docker-image ${{ env.IMAGE_URI }} --name dev-cluster
+          echo "✓ Image loaded into kind as ${{ env.IMAGE_URI }}"
+
+      - name: Create initial deployment in kind (development only)
+        run: |
+          kubectl create namespace ${{ env.K8S_NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy to EKS (Emulated by kind)
+        run: |
+          echo "Rolling out: ${{ env.IMAGE_URI }}"
+
+          sed -e "s|\${IMAGE_URI}|${{ env.IMAGE_URI }}|g" \
+            -e "s|\${IMAGE_PULL_POLICY}|IfNotPresent|g" \
+            deploy/kubernetes/flow-deploy-eks.yaml | kubectl apply -f -
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT }} \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --timeout=300s
+
+      - name: Deployment summary
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | development |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ env.IMAGE_URI }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | \`${{ env.K8S_NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment | \`${{ env.K8S_DEPLOYMENT }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Teardown kind cluster (development only)
+        if: always()
+        run: |
+          kind delete cluster --name dev-cluster
+          echo "✓ kind cluster deleted"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Production deploy — targets real AWS infrastructure.
+  # Authenticates via OIDC (IAM role assumption), verifies the image exists in
+  # ECR, then applies deploy/kubernetes/flow-deploy-eks.yaml against the EKS
+  # cluster using kubectl. Requires manual approval via the "production"
+  # GitHub environment before any step executes.
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-production:
+    name: Deploy › production
+    runs-on: ubuntu-latest
+    needs: resolve-image
+    if: github.event.inputs.environment == 'production'
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install kubectl
+        run: |
+          KUBECTL_VERSION=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
+          curl -fsSL -o kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Install AWS CLI
+        run: |
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+          unzip -q awscliv2.zip
+          sudo ./aws/install --update
+          aws --version
+          
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
+
+      - name: Verify image exists in ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ needs.resolve-image.outputs.image_tag }}
+        run: |
+          echo "Checking ECR for: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          aws ecr describe-images \
+            --repository-name ${{ env.ECR_REPOSITORY }} \
+            --image-ids imageTag=$IMAGE_TAG \
+            --region ${{ env.AWS_REGION }}
+          echo "✓ Image confirmed in ECR"
+
+      - name: Deploy to EKS
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ needs.resolve-image.outputs.image_tag }}
+        run: |
+          export IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          export IMAGE_PULL_POLICY=Always
+          echo "Rolling out: $IMAGE_URI"
+
+          sed -e "s|\${IMAGE_URI}|$IMAGE_URI|g" \
+            -e "s|\${IMAGE_PULL_POLICY}|Always|g" \
+            deploy/kubernetes/flow-deploy-eks.yaml | kubectl apply -f -
+
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT }} \
+            --namespace ${{ env.K8S_NAMESPACE }} \
+            --timeout=300s
+
+      - name: Deployment summary
+        run: |
+          echo "### Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | **production** |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ env.IMAGE_URI }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Namespace | \`${{ env.K8S_NAMESPACE }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployment | \`${{ env.K8S_DEPLOYMENT }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY

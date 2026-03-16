@@ -1,0 +1,81 @@
+name: 🔄 Sync Upstream LiteLLM > Flow
+
+on:
+  schedule:
+    - cron: '0 0 * * 1,3'  # Runs Mondays and Wednesdays at midnight UTC
+  workflow_dispatch:
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      behind_count: ${{ steps.check_changes.outputs.behind_count }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote get-url upstream 2>/dev/null || git remote add upstream https://github.com/BerriAI/litellm.git
+
+      - name: Fetch upstream changes
+        run: git fetch upstream main
+
+      - name: Check for upstream changes
+        id: check_changes
+        run: |
+          BEHIND_COUNT=$(git rev-list --count origin/main..upstream/main)
+          echo "behind_count=$BEHIND_COUNT" >> $GITHUB_OUTPUT
+
+          if [ "$BEHIND_COUNT" -gt "0" ]; then
+            echo "✅ Upstream has $BEHIND_COUNT new commit(s) ahead of origin/main."
+          else
+            echo "✅ origin/main is up to date with upstream."
+          fi
+
+  sync-upstream:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.behind_count > 0
+    runs-on: ubuntu-latest
+    environment: sync-approval
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Add upstream remote
+        run: |
+          git remote get-url upstream 2>/dev/null || git remote add upstream https://github.com/BerriAI/litellm.git
+
+      - name: Fetch upstream changes
+        run: |
+          git fetch upstream main
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync main with upstream
+        run: |
+          git push origin upstream/main:main --force-with-lease
+          echo "✅ origin/main is now exactly equal to upstream/main."
+
+      - name: Rebase develop-flow onto main
+        run: |
+          git fetch origin develop-flow
+          git checkout develop-flow
+          git rebase origin/main
+          git push origin develop-flow --force-with-lease
+          echo "✅ develop-flow rebased onto main."
