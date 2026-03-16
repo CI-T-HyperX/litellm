@@ -7,6 +7,9 @@ up:
 down:
 	@docker compose down --remove-orphans
 
+get-ip:
+	@docker network inspect flow_monitoring | jq '.[].IPAM.Config | .[].Gateway'
+
 # Development
 sh-prod:
 	@docker exec -it litellm-dev /bin/bash
@@ -19,5 +22,6 @@ run-wf:
 	-e LITELLM_MASTER_KEY=your-secret-key \
 	litellm-dev:local --config=/app/config.yaml --port 4000
 
-get-ip:
-	@docker network inspect flow_monitoring | jq '.[].IPAM.Config | .[].Gateway'
+# Fetch origin, reset local develop-flow branch to match remote, and verify sync
+dev-sync:
+	@bash $(dir $(abspath $(lastword $(MAKEFILE_LIST))))sync_develop_flow.sh

@@ -11,13 +11,25 @@ Este repositório possui três branches principais:
 ### Principais orientações
 
 - Nunca faça commits ou PRs diretamente na branch *main*.
-- A branch que acumula todo o desenvolvimento é a *develop-flow*. As PRs devem ser criadas apontando para *develop-flow*.
-- production-flow deve ser atualizada com o conteúdo de *develop-flow* após a validação das mudanças.
-- Evite ao máximo modificar arquivos da *main* para diminuir as ocorrências de conflito. Procure sempre que possível criar novos arquivos.
+- A branch ***mãe*** a partir de onde deve-se criar uma nova branch para desenvolvimento é a ***develop-flow***. As PRs devem ser criadas apontando para ***develop-flow***.
+- Antes de iniciar uma branch a partir de ***develop-flow*** faça a sincronização pelo script `dev-sync` *(Vide procedimento abaixo em 'sync da develop-flow' )*.
+- *production-flow* deve ser atualizada com o conteúdo de *develop-flow* (merge) após a validação das mudanças.
+- Evite ao máximo modificar arquivos da *main* para diminuir a ocorrência de conflitos. Procure sempre que possível criar novos arquivos.
 
 ---
 
 ## Desenvolvimento
+
+### Sync da develop-flow
+
+Para fazer a sincronização da branch local 'develop-flow' com a remota 'origin/develop-flow' antes de um novo desenvolvimento:
+
+```sh
+cd scrips/flow
+make dev-sync
+```
+
+O script alertará se a branch possui alterações não salvas. **Não prossiga** com o sync caso existam pendências pois o processo irá **deletar permanentemente alterações não salvas**.
 
 ### Rodando LiteLLM e monitoramento (Prometheus e Grafana)
 
@@ -67,7 +79,7 @@ make down
 
 ### Rodando pipes
 
-#### Build e Push de imagem para AWS ECR
+#### Build e Push de imagem para AWS ECR (emulando localmente)
 
 Para rodar localmente utilizando um emulador de execução de pipe
 
@@ -88,6 +100,27 @@ curl https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
 ```sh
 curl http://localhost:5001/v2/litellm-dev/tags/list
 ```
+
+#### Deploy no AWS EKS (emulando localmente)
+
+Para rodar localmente utilizando um emulador de execução de pipe
+
+1) Instalar o emulador de execução de pipe `act` (*se ainda não instalado)*
+
+```sh
+curl https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
+```
+
+2) Rodar o comando act com parâmetros
+
+```sh
+./bin/act workflow_dispatch \
+  --workflows .github/workflows/flow-deploy-eks.yml \
+  --input environment=development \
+  --network host
+```
+
+Se tudo correr bem no final do procedimento um resumo será exibido para o usuário.
 
 ### Operação local do LiteLLM
 
