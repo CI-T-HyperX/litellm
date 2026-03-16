@@ -56,10 +56,13 @@ Além da imagem é necessário o arquivo `config.yaml` com as chaves dos modelos
 Após confirmar que o arquivo `config.yaml` existe e está corretamente preenchido podemos rodar a aplicação com o comando abaixo:
 
 ```sh
+cd scripts/flow
 make run-wf
 ```
 
 O serviço deve estar acessivel na URL [http://localhost:4000](http://localhost:4000).
+
+*Obs*: Os scripts específicos para as operações do Flow deverão ser colocados na pasta `scripts/flow`.
 
 ## Workflow de Sincronização com Upstream (`sync-upstream.yml`)
 
@@ -138,4 +141,79 @@ git rebase origin/main
 # resolva os conflitos e então:
 git rebase --continue
 git push origin develop-flow --force-with-lease
+```
+
+## Workflow de Deploy no AWS EKS (`flow-deploy-eks.yml`)
+
+Realiza o deploy da imagem LiteLLM no Kubernetes via `kubectl apply`, usando o manifesto `deploy/kubernetes/flow-deploy-eks.yaml`. Suporta dois ambientes com estratégias distintas.
+
+### Gatilhos
+
+- **Manual**: Acionado via `workflow_dispatch` na interface do GitHub Actions
+
+### Entradas
+
+| Campo | Obrigatório | Padrão | Descrição |
+|---|---|---|---|
+| `environment` | Não | `production` | Ambiente alvo: `development` ou `production` |
+| `image_tag` | Não | `latest` | Tag da imagem ECR a ser implantada |
+
+---
+
+### Fluxo — development
+
+Executa **inteiramente local**, sem credenciais AWS reais. O ECR é emulado pelo **moto server** e o Kubernetes por um cluster **kind** criado dentro do próprio runner.
+
+```
+resolve-image
+    └─► deploy-development
+            ├─ Instala kubectl e AWS CLI
+            ├─ Aguarda moto server (ECR emulado)
+            ├─ Instala kind
+            ├─ Cria repositório ECR no moto
+            ├─ Registra a tag da imagem no moto ECR
+            ├─ Verifica existência da imagem (moto ECR) → expõe IMAGE_URI
+            ├─ Cria cluster kind
+            ├─ Carrega nginx:alpine como IMAGE_URI no kind
+            ├─ Cria namespace no kind
+            ├─ Aplica flow-deploy-eks.yaml (imagePullPolicy: IfNotPresent)
+            ├─ Aguarda rollout
+            ├─ Resumo do deploy
+            └─ Destroi cluster kind (always)
+```
+
+#### Rodando localmente com `act`
+
+1. Instalar o `act` *(se ainda não instalado)*:
+
+```sh
+curl https://raw.githubusercontent.com/nektos/act/master/install.sh | bash
+```
+
+2. Executar o workflow apontando para o ambiente de desenvolvimento:
+
+```sh
+./bin/act workflow_dispatch \
+  --workflows .github/workflows/flow-deploy-eks.yml \
+  --input environment=development \
+  --network host
+```
+
+---
+
+### Fluxo — production
+
+Requer aprovação manual pelo ambiente **`production`** antes de qualquer etapa. Autentica na AWS via OIDC, verifica a imagem no ECR e aplica o manifesto no cluster EKS real.
+
+```
+resolve-image
+    └─► deploy-production  (aguarda aprovação manual)
+            ├─ Instala kubectl e AWS CLI
+            ├─ Configura credenciais AWS (OIDC / role assumption)
+            ├─ Login no Amazon ECR
+            ├─ Configura kubectl para o cluster EKS
+            ├─ Verifica existência da imagem no ECR
+            ├─ Aplica flow-deploy-eks.yaml (imagePullPolicy: Always)
+            ├─ Aguarda rollout
+            └─ Resumo do deploy
 ```
