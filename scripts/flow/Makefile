@@ -21,3 +21,7 @@ run-wf:
 	-v $(PROJECT_ROOT)/config.yaml:/app/config.yaml \
 	-e LITELLM_MASTER_KEY=your-secret-key \
 	litellm-dev:local --config=/app/config.yaml --port 4000
+
+# Fetch origin, reset local develop-flow branch to match remote, and verify sync
+dev-sync:
+	@bash $(dir $(abspath $(lastword $(MAKEFILE_LIST))))sync_develop_flow.sh
