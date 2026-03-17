@@ -19,6 +19,52 @@ Este repositório possui três branches principais:
 
 ## Desenvolvimento
 
+### Rodando LiteLLM e monitoramento (Prometheus e Grafana)
+
+Para rodar localmente siga os passos abaixo:
+
+1) Inserir a linha abaixo no arquivo config.yaml
+
+```yaml
+litellm_settings:
+    callbacks: ["prometheus"]
+    prometheus_initialize_budget_metrics: true
+```
+
+2) Subir todos os três serviços, volumes e rede.
+
+```sh
+cd scripts/flow
+make up
+```
+
+3) Acessar os links abaixo para validar os serviços.
+
+- [LiteLLM Métricas](http://localhost:4000/metrics/)
+- [Prometheus Server](http://localhost:9090/)
+- [Grafana](http://localhost:3000/)
+
+4) Configurar o Grafana
+
+Rodar o scrips abaixo para encontrar o IP:
+
+```sh
+cd scripts/flow
+make get-ip
+```
+
+- *Connections* > *Add new connection*
+- Instalar a conexão chamada **Prometheus**
+- No campo Connection inserir o IP retornado pelo comando acima + porta 9090 `http://<local-ip>:9090`
+- Clicar no botão **Save & test**
+
+Para derrubar as aplicações
+
+```sh
+cd scripts/flow
+make down
+```
+
 ### Rodando pipes
 
 #### Build e Push de imagem para AWS ECR
