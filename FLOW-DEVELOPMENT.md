@@ -31,6 +31,52 @@ make dev-sync
 
 O script alertará se a branch possui alterações não salvas. **Não prossiga** com o sync caso existam pendências pois o processo irá **deletar permanentemente alterações não salvas**.
 
+### Arquivo de configuração
+
+O LiteLLM, no caso do Flow, utiliza o arquivo `config.yaml` localizado na raiz do projeto.
+Abaixo segue um exemplo para criar a configuração necessária para o LiteLLM.
+
+```yml
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: azure/gpt-4o-mini
+      api_base: <BASE_URL>      
+      api_key: <YOUR_API_KEY_HERE>
+      api_version: "2024-12-01-preview"
+
+  - model_name: gemini-2.5-flash
+    litellm_params:
+      model: vertex_ai/gemini-2.5-flash
+      vertex_project: ciandt-flow-platform
+      vertex_location: us-central1
+      vertex_credentials: |
+        {
+          "type": "service_account",
+          "project_id": "ciandt-flow-platform",
+          "private_key_id": "<YOUR_API_KEY_ID_HERE>",
+          "private_key": "<YOUR_API_KEY_HERE>",
+          "client_email": "<VERTEX_PROJECT_EMAIL>",
+          "client_id": "<se você tiver, opcional>",
+          "token_uri": "https://oauth2.googleapis.com/token"
+        }
+
+  - model_name: claude-4.5-sonnet
+    litellm_params:
+      model: bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0
+      aws_access_key_id: <YOUR_API_KEY_ID_HERE>
+      aws_secret_access_key: <YOUR_API_KEY_HERE>
+      aws_region_name: us-east-1
+
+general_settings:
+  set_verbose: true
+  pass_through_all_headers: true
+
+litellm_settings:
+    callbacks: ["prometheus"]
+    prometheus_initialize_budget_metrics: true
+```
+
 ### Rodando LiteLLM e monitoramento (Prometheus e Grafana)
 
 Para rodar localmente siga os passos abaixo:
@@ -69,6 +115,7 @@ make get-ip
 - Instalar a conexão chamada **Prometheus**
 - No campo Connection inserir o IP retornado pelo comando acima + porta 9090 `http://<local-ip>:9090`
 - Clicar no botão **Save & test**
+- Baixar o JSON do dashboard LiteLLM no [Grafana Dashboards](https://grafana.com/grafana/dashboards/24965-litellm/) e importar o arquivo JSON no Grafana
 
 Para derrubar as aplicações
 
@@ -76,6 +123,85 @@ Para derrubar as aplicações
 cd scripts/flow
 make down
 ```
+
+### Testando manualmente a inferência
+
+Após subir os serviços seguindo o procedimento acima teste as inferências enviando requisições para o endpoint correspondente.
+
+*Testando modelos OpenAI*
+
+```sh
+curl http://localhost:4000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "gpt-4o-mini",
+      "messages": [{"role": "user", "content": "Hello!"}]
+    }'
+```
+
+*Testando modelos Gemini*
+
+```sh
+curl http://localhost:4000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "gemini-2.5-flash",
+      "messages": [{"role": "user", "content": "Hello!"}]
+    }'
+```
+
+*Testando modelos Bedrock*
+
+```sh
+curl http://localhost:4000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "claude-4.5-sonnet",
+      "messages": [{"role": "user", "content": "Hello!"}]
+    }'
+```
+
+### Rodando testes de latência e outros com JMeter (localmente)
+
+**!! ATENÇÃO: OS TESTES SÃO FEITOS CONSUMINDO TOKENS DOS PROVIDERS. TENHA CAUTELA AO TESTAR !!**
+
+Considerando que todos os serviços estão de pé na máquina local e que o Grafana foi corretamente configurado basta seguir os passos abaixo:
+
+1) Verificar os parâmetros de teste no arquivo `scripts/flow/jmeter/latency-probe.jmx`. Segue um guia simplificado do XML.
+
+```xml
+latency-probe.jmx                                                                                                                                   
+  ├── TestPlan "latency-probe"                                                                                                                    
+  │   ├── serialize_threadgroups: true                                                                                                                
+  │   ├── tearDown_on_shutdown: true
+  │   └── user_defined_variables                                                                                                                      
+  │       ├── LITELLM_HOST = localhost
+  │       └── LITELLM_PORT = 4000
+  │
+  └── ThreadGroup "load"
+      ├── threads: 2 | ramp: 10s | duration: 30s
+      │
+      ├── InterleaveControl "Interleave Payloads"
+      │   │
+      │   ├── /v1/chat/completions  model: azure/gpt-4o-mini
+      │   ├── /v1/chat/completions  model: gemini-2.5-flash
+      │   └── /v1/chat/completions  model: claude-4.5-sonnet
+      │
+      └── ResultCollector "View Results Tree"
+
+  └── ResultCollector "Aggregate Report"
+```
+
+2) Rodar o script
+
+```sh
+cd scripts/flow
+make performance-tests
+```
+
+3) Após o teste terminar consulte os resultados dentro da pasta `scripts/flow/jmeter/report/`.
+
+4) *(OPCIONAL)* Acesse o Grafana em [http://localhost:3000](http://localhost:3000) para consultar os relatórios de utilização baseados nos dados de métricas coletados pelo *Prometheus*.
 
 ### Rodando pipes
 

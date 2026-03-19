@@ -1,4 +1,6 @@
 PROJECT_ROOT := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../..)
+FLOW_DIR     := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+JMETER_DIR   := $(FLOW_DIR)jmeter
 
 # Compose stack for LiteLLM, Prometheus and Grafana
 up:
@@ -13,6 +15,19 @@ get-ip:
 # Development
 sh-prod:
 	@docker exec -it litellm-dev /bin/bash
+
+# Run performance tests using JMeter
+performance-tests:
+	$(eval RUN_ID := $(shell date +%Y%m%d_%H%M%S))
+	@mkdir -p $(JMETER_DIR)/report/$(RUN_ID)
+	@docker run --rm --network host \
+		-v $(JMETER_DIR):/jmeter \
+		justb4/jmeter:5.5 \
+		-n \
+		-t /jmeter/latency-probe.jmx \
+		-l /jmeter/report/$(RUN_ID)/results.jtl \
+		-e \
+		-o /jmeter/report/$(RUN_ID)
 
 # Run build from .github/workflows/build-and-push-ecr.yml
 run-wf:
